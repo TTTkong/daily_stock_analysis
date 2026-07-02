@@ -2218,6 +2218,26 @@ class EastMoneyNewsProvider(BaseSearchProvider):
 
     # ---------- BaseSearchProvider interface ----------
 
+    @staticmethod
+    def _extract_stock_code(query: str) -> Optional[str]:
+        """从 query 中提取 A 股 6 位代码。
+
+        支持格式：
+        - 纯代码 "600519"
+        - "贵州茅台 600519 最新 新闻"
+        - 港股前缀 "hk00700"
+        """
+        import re as _re
+        # 匹配纯 6 位数字（A 股代码）
+        m = _re.search(r"(?<!\d)(\d{6})(?!\d)", query)
+        if m:
+            return m.group(1)
+        # 匹配 hk 前缀 + 数字（港股）
+        m = _re.search(r"(?i)hk(\d{5})", query)
+        if m:
+            return m.group(0)
+        return None
+
     def _do_search(
         self,
         query: str,
@@ -2227,22 +2247,18 @@ class EastMoneyNewsProvider(BaseSearchProvider):
     ) -> SearchResponse:
         """执行搜索。
 
-        query 可以是：
-        - 纯 6 位数字 → 视为股票代码，走个股新闻
-        - 其他 → 走全球资讯（用于大盘复盘等场景）
+        优先从 query 中提取 A 股 6 位代码走个股新闻；
+        提取不到时走全球资讯（大盘复盘等场景）。
         """
         import re as _re
 
         start_time = time.time()
-        code_match = _re.match(r"^(\d{6})$", query.strip())
-
+        code = self._extract_stock_code(query)
+        
         try:
-            if code_match:
-                # 个股新闻搜索
-                code = code_match.group(1)
+            if code:
                 raw_news = self._eastmoney_stock_news(code, page_size=max(20, max_results * 2))
             else:
-                # 全球资讯 / 大盘新闻
                 raw_news = self._eastmoney_global_news(page_size=max(50, max_results * 5))
 
             results = []
