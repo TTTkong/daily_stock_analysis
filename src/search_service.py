@@ -2094,6 +2094,189 @@ class SearXNGSearchProvider(BaseSearchProvider):
         )
 
 
+class EastMoneyNewsProvider(BaseSearchProvider):
+    """东方财富个股新闻 + 全球资讯 provider（免费，无需 API Key）。
+
+    封装 a-stock-data SKILL 中的东财新闻端點：
+    - eastmoney_stock_news(code): 个股相关新闻
+    - eastmoney_global_news(): 7×24 财经快讯
+
+    全部走东财公开 HTTP API，零鉴权，自带限流防封。
+    """
+
+    _UA = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    )
+
+    def __init__(self):
+        # 无需 API Key，传一个占位符给基类以防止 is_available 误判
+        super().__init__(["free_no_key_needed"], "EastMoney")
+        self._session = None
+
+    @property
+    def is_available(self) -> bool:
+        """东财新闻接口始终可用（免费公开 HTTP，无需 key）。"""
+        return True
+
+    def _get_session(self):
+        """延迟创建复用 session（Keep-Alive，减少连接开销）。"""
+        if self._session is None:
+            import requests as _requests
+            self._session = _requests.Session()
+            self._session.headers.update({
+                "User-Agent": self._UA,
+                "Accept": "application/json, text/plain, */*",
+            })
+        return self._session
+
+    # ---------- 东财个股新闻 ----------
+
+    @staticmethod
+    def _eastmoney_stock_news(code: str, page_size: int = 20) -> list[dict]:
+        """调用东财个股新闻 JSONP 接口。"""
+        import json as _json
+        import re as _re
+        import requests as _requests
+
+        cb = "jQuery_news"
+        url = "https://search-api-web.eastmoney.com/search/jsonp"
+        inner_params = _json.dumps({
+            "uid": "",
+            "keyword": code,
+            "type": ["cmsArticleWebOld"],
+            "client": "web",
+            "clientType": "web",
+            "clientVersion": "curr",
+            "param": {
+                "cmsArticleWebOld": {
+                    "searchScope": "default",
+                    "sort": "default",
+                    "pageIndex": 1,
+                    "pageSize": page_size,
+                    "preTag": "",
+                    "postTag": "",
+                }
+            },
+        }, separators=(',', ':'))
+        params = {"cb": cb, "param": inner_params}
+        headers = {
+            "User-Agent": EastMoneyNewsProvider._UA,
+            "Referer": "https://so.eastmoney.com/",
+        }
+        r = _requests.get(url, params=params, headers=headers, timeout=15)
+        text = r.text
+        json_str = text[text.index("(") + 1 : text.rindex(")")]
+        d = _json.loads(json_str)
+
+        rows = []
+        articles = d.get("result", {}).get("cmsArticleWebOld", []) or []
+        for a in articles:
+            rows.append({
+                "title": _re.sub(r'<[^>]+>', '', a.get("title", "")),
+                "content": _re.sub(r'<[^>]+>', '', a.get("content", ""))[:200],
+                "time": a.get("date", ""),
+                "source": a.get("mediaName", ""),
+                "url": a.get("url", ""),
+            })
+        return rows
+
+    # ---------- 东财全球资讯 ----------
+
+    @staticmethod
+    def _eastmoney_global_news(page_size: int = 50) -> list[dict]:
+        """调用东财 7×24 全球财经快讯接口。"""
+        import uuid as _uuid
+        import requests as _requests
+
+        url = "https://np-weblist.eastmoney.com/comm/web/getFastNewsList"
+        params = {
+            "client": "web",
+            "biz": "web_724",
+            "fastColumn": "102",
+            "sortEnd": "",
+            "pageSize": str(page_size),
+            "req_trace": str(_uuid.uuid4()),
+        }
+        headers = {
+            "User-Agent": EastMoneyNewsProvider._UA,
+            "Referer": "https://kuaixun.eastmoney.com/",
+        }
+        r = _requests.get(url, params=params, headers=headers, timeout=10)
+        d = r.json()
+
+        rows = []
+        for item in d.get("data", {}).get("fastNewsList", []):
+            rows.append({
+                "title": item.get("title", ""),
+                "summary": item.get("summary", "")[:200],
+                "time": item.get("showTime", ""),
+                "source": "东方财富",
+                "url": "",
+            })
+        return rows
+
+    # ---------- BaseSearchProvider interface ----------
+
+    def _do_search(
+        self,
+        query: str,
+        api_key: str,
+        max_results: int,
+        days: int = 7,
+    ) -> SearchResponse:
+        """执行搜索。
+
+        query 可以是：
+        - 纯 6 位数字 → 视为股票代码，走个股新闻
+        - 其他 → 走全球资讯（用于大盘复盘等场景）
+        """
+        import re as _re
+
+        start_time = time.time()
+        code_match = _re.match(r"^(\d{6})$", query.strip())
+
+        try:
+            if code_match:
+                # 个股新闻搜索
+                code = code_match.group(1)
+                raw_news = self._eastmoney_stock_news(code, page_size=max(20, max_results * 2))
+            else:
+                # 全球资讯 / 大盘新闻
+                raw_news = self._eastmoney_global_news(page_size=max(50, max_results * 5))
+
+            results = []
+            for item in raw_news[:max_results]:
+                results.append(SearchResult(
+                    title=item.get("title", ""),
+                    snippet=item.get("content") or item.get("summary", ""),
+                    url=item.get("url", ""),
+                    source=item.get("source", "东方财富"),
+                    published_date=item.get("time", ""),
+                ))
+
+            elapsed = time.time() - start_time
+            return SearchResponse(
+                query=query,
+                results=results,
+                provider=self.name,
+                success=True,
+                search_time=elapsed,
+            )
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"[EastMoney] 搜索 '{query}' 失败: {e}")
+            return SearchResponse(
+                query=query,
+                results=[],
+                provider=self.name,
+                success=False,
+                error_message=str(e),
+                search_time=elapsed,
+            )
+
+
 class SearchService:
     """
     搜索服务
@@ -2264,6 +2447,7 @@ class SearchService:
         minimax_keys: Optional[List[str]] = None,
         searxng_base_urls: Optional[List[str]] = None,
         searxng_public_instances_enabled: bool = True,
+        eastmoney_news_enabled: bool = True,
         news_max_age_days: int = 3,
         news_strategy_profile: str = "short",
     ):
@@ -2301,6 +2485,11 @@ class SearchService:
         )
 
         # 初始化搜索引擎（按优先级排序）
+        # 0. 东方财富免费新闻源（最高优先级 — 免费零鉴权，直连个股新闻+全球资讯）
+        if eastmoney_news_enabled:
+            self._providers.append(EastMoneyNewsProvider())
+            logger.info("已配置东方财富免费新闻源（个股新闻 + 全球资讯）")
+
         # 1. Bocha 优先（中文搜索优化，AI摘要）
         if bocha_keys:
             self._providers.append(BochaSearchProvider(bocha_keys))
