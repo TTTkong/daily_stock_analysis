@@ -2257,8 +2257,16 @@ class EastMoneyNewsProvider(BaseSearchProvider):
         
         try:
             if code:
+                logger.info(
+                    "[EastMoney] 个股新闻搜索: code=%s, query='%s', max_results=%s",
+                    code, query, max_results,
+                )
                 raw_news = self._eastmoney_stock_news(code, page_size=max(20, max_results * 2))
             else:
+                logger.info(
+                    "[EastMoney] 全球资讯搜索: query='%s', max_results=%s",
+                    query, max_results,
+                )
                 raw_news = self._eastmoney_global_news(page_size=max(50, max_results * 5))
 
             results = []
@@ -2272,6 +2280,10 @@ class EastMoneyNewsProvider(BaseSearchProvider):
                 ))
 
             elapsed = time.time() - start_time
+            logger.info(
+                "[EastMoney] 搜索完成: code=%s, raw=%s, returned=%s, elapsed=%.2fs",
+                code or "N/A", len(raw_news), len(results), elapsed,
+            )
             return SearchResponse(
                 query=query,
                 results=results,
