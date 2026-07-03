@@ -2258,19 +2258,34 @@ class EastMoneyNewsProvider(BaseSearchProvider):
         try:
             if code:
                 logger.info(
-                    "[EastMoney] 个股新闻搜索: code=%s, query='%s', max_results=%s",
-                    code, query, max_results,
+                    "[EastMoney] 个股新闻搜索: code=%s, query='%s', max_results=%s, days=%s",
+                    code, query, max_results, days,
                 )
                 raw_news = self._eastmoney_stock_news(code, page_size=max(20, max_results * 2))
             else:
                 logger.info(
-                    "[EastMoney] 全球资讯搜索: query='%s', max_results=%s",
-                    query, max_results,
+                    "[EastMoney] 全球资讯搜索: query='%s', max_results=%s, days=%s",
+                    query, max_results, days,
                 )
                 raw_news = self._eastmoney_global_news(page_size=max(50, max_results * 5))
 
+            # 自行按时效过滤（避免下游 strict_freshness 窗口太小把结果全扔掉）
+            threshold = time.time() - days * 86400
+            filtered_news = []
+            for item in raw_news:
+                ts = item.get("time", "")
+                # 尝试解析日期做精确过滤
+                try:
+                    from datetime import datetime as _dt
+                    item_dt = _dt.strptime(ts[:10], "%Y-%m-%d") if ts and len(ts) >= 10 else None
+                    if item_dt and item_dt.timestamp() < threshold:
+                        continue
+                except (ValueError, OSError):
+                    pass  # 解析失败则不过滤
+                filtered_news.append(item)
+
             results = []
-            for item in raw_news[:max_results]:
+            for item in filtered_news[:max_results]:
                 results.append(SearchResult(
                     title=item.get("title", ""),
                     snippet=item.get("content") or item.get("summary", ""),
